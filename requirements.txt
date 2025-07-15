@@ -1,0 +1,11 @@
+# product_orchestrator_service/requirements.txt
+
+fastapi
+uvicorn
+httpx
+
+# Dependencies for testing
+pytest
+pytest-asyncio
+respx
+exceptiongroup

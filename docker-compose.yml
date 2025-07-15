@@ -1,0 +1,10 @@
+# This docker-compose.yml should be inside your new standalone project folder.
+
+services:
+  orchestrator:
+    build: .
+    container_name: orchestrator_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app  # This mounts your code for live-reloading during development
