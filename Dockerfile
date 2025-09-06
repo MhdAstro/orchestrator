@@ -1,6 +1,6 @@
 # This Dockerfile should be inside your new standalone project folder.
 
-FROM python:3.10-slim
+FROM python:3.10-alpine
 WORKDIR /app
 
 # Copy requirements file
