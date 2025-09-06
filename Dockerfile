@@ -6,9 +6,8 @@ WORKDIR /app
 # Copy requirements file
 COPY requirements.txt .
 
-# Copy and install the pre-downloaded offline packages
-COPY ./packages /app/packages/
-RUN pip install --no-cache-dir --no-index --find-links=/app/packages -r requirements.txt
+# Install dependencies directly from PyPI
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy your application and test code
 COPY ./app /app
