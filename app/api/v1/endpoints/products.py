@@ -52,14 +52,17 @@ async def create_product_from_webhook(
     # --- Step 2: Process Media (Images and Video Concurrently) ---
     try:
         tasks = []
+        task_urls = []
         logger.info(f"Calling Image Uploader for {len(photo_links)} photos at: {SMART_UPLOADER_URL}")
         tasks.append(client.post(SMART_UPLOADER_URL, json={"photo_links": photo_links}))
+        task_urls.append(SMART_UPLOADER_URL)
 
         video_task_present = False
         if video_link:
             video_task_present = True
             logger.info(f"Calling Video Checker at: {VIDEO_CHECK_URL}")
             tasks.append(client.post(VIDEO_CHECK_URL, json={"video-link": video_link}))
+            task_urls.append(VIDEO_CHECK_URL)
         else:
             logger.info("No video link provided, skipping video check.")
 
@@ -67,7 +70,7 @@ async def create_product_from_webhook(
 
         for i, res in enumerate(responses):
             if isinstance(res, Exception):
-                failed_url = tasks[i].url
+                failed_url = task_urls[i]
                 logger.error(f"Network error while calling {failed_url}: {res}")
                 raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=f"Network error for {failed_url}")
 
