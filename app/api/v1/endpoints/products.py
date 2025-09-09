@@ -17,7 +17,8 @@ router = APIRouter()
 SMART_UPLOADER_URL = "https://smart-uploader.basalam.dev/process-images"
 VIDEO_CHECK_URL = "https://dwh-n8n.basalam.dev/webhook-test/Video-Check"
 DESCRIPTION_SERVICE_URL = "https://request-maker.basalam.dev/api/v1/generate-description" # <-- IMPORTANT: Update this URL
-BASALAM_FINAL_API_URL = "https://core.basalam.com/v3/vendors/1120109/products" # <-- IMPORTANT: Update vendor_id
+BASALAM_USER_INFO_URL = "https://core.basalam.com/v3/users/me"
+BASALAM_PRODUCTS_URL_TEMPLATE = "https://core.basalam.com/v3/vendors/{vendor_id}/products"
 
 # --- HTTP Client Dependency ---
 async def get_http_client():
@@ -49,6 +50,28 @@ async def create_product_from_webhook(
     video_link = str(payload.raw_data_json.video) if payload.raw_data_json.video else None
     stock = payload.raw_data_json.stock
     access_token = payload.access_token
+    
+    # --- Step 1.5: Get User Info and Vendor ID ---
+    try:
+        logger.info(f"Getting user info from Basalam API at: {BASALAM_USER_INFO_URL}")
+        headers = {"Authorization": f"Bearer {access_token}"}
+        user_info_response = await client.get(BASALAM_USER_INFO_URL, headers=headers)
+        logger.info(f"User info API responded with status: {user_info_response.status_code}")
+        user_info_response.raise_for_status()
+        
+        user_data = user_info_response.json()
+        vendor_id = user_data.get("vendor", {}).get("id")
+        
+        if not vendor_id:
+            logger.error("User does not have a vendor account or vendor ID is missing.")
+            raise HTTPException(status_code=400, detail="User does not have a valid vendor account.")
+        
+        logger.info(f"Successfully retrieved vendor_id: {vendor_id}")
+        basalam_final_url = BASALAM_PRODUCTS_URL_TEMPLATE.format(vendor_id=vendor_id)
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error from Basalam user info API: Status {e.response.status_code} - Response: {e.response.text}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Authentication failed: {e.response.text}")
 
     # --- Step 2: Process Media (Images and Video Concurrently) ---
     try:
@@ -138,10 +161,10 @@ async def create_product_from_webhook(
 
     # --- Step 5: Final Submission to Basalam ---
     try:
-        logger.info(f"Submitting final payload to Basalam API at: {BASALAM_FINAL_API_URL}")
+        logger.info(f"Submitting final payload to Basalam API at: {basalam_final_url}")
         # Use the access token from the payload for authentication
         headers = {"Authorization": f"Bearer {access_token}"}
-        final_response = await client.post(BASALAM_FINAL_API_URL, json=basalam_ready_payload, headers=headers)
+        final_response = await client.post(basalam_final_url, json=basalam_ready_payload, headers=headers)
         logger.info(f"Basalam API responded with status: {final_response.status_code}")
         final_response.raise_for_status()
         
