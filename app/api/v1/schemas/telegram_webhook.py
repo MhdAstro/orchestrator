@@ -12,3 +12,4 @@ class RawDataJson(BaseModel):
 
 class TelegramWebhookPayload(BaseModel):
     raw_data_json: RawDataJson
+    access_token: str
