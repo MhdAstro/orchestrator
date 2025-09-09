@@ -148,6 +148,7 @@ async def create_product_from_webhook(
         if video_id:
             basalam_ready_payload["video"] = video_id          # Use the correct key "video"
 
+        basalam_ready_payload["vendor_id"] = vendor_id
         basalam_ready_payload["preparation_days"] = 1
         basalam_ready_payload["stock"] = stock
         basalam_ready_payload["unit_type"] = 6304 # Example ID for "عدد"
