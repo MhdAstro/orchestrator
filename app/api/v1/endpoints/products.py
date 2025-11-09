@@ -15,7 +15,6 @@ router = APIRouter()
 # --- External Service URLs ---
 # Replace these with the actual URLs of your services.
 SMART_UPLOADER_URL = "https://smart-uploader.basalam.dev/process-images"
-VIDEO_ANALYSIS_URL = "https://video-analysis.basalam.dev/analyze-video/"
 VIDEO_UPLOAD_URL = "https://videoupload.basalam.dev/upload-from-url/"
 DESCRIPTION_SERVICE_URL = "https://request-maker.basalam.dev/api/v1/generate-description"
 BASALAM_USER_INFO_URL = "https://core.basalam.com/v3/users/me"
@@ -41,9 +40,7 @@ async def create_product_from_webhook(
     1.  Receives a raw webhook payload from Telegram.
     2.  Authenticates user and retrieves vendor ID.
     3.  Processes images through Smart Uploader service.
-    4.  Processes video in 2 steps:
-        a. Analyzes video content for moderation (video-analysis service)
-        b. Uploads video if content is approved (videoupload service)
+    4.  Uploads video through videoupload service (if video provided).
     5.  Calls the description service to generate product details.
     6.  Injects media IDs into the payload with the correct format.
     7.  Submits the final, complete payload to the Basalam API.
@@ -99,47 +96,29 @@ async def create_product_from_webhook(
         logger.error(f"HTTP error from Image Uploader: Status {e.response.status_code} - Response: {e.response.text}")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error from Image Uploader: {e.response.text}")
 
-    # --- Step 3: Process Video (2-Step: Analyze then Upload) ---
+    # --- Step 3: Upload Video ---
     video_id = None
     if video_link:
         try:
-            # Step 3.1: Analyze video content for moderation
-            logger.info(f"Calling Video Analysis Service at: {VIDEO_ANALYSIS_URL}")
-            analysis_response = await client.post(VIDEO_ANALYSIS_URL, json={"url": video_link}, timeout=120.0)
+            logger.info(f"Calling Video Upload Service at: {VIDEO_UPLOAD_URL}")
+            upload_response = await client.post(VIDEO_UPLOAD_URL, json={"url": video_link}, timeout=120.0)
 
-            logger.info(f"Video Analysis Service responded with status: {analysis_response.status_code}")
-            analysis_response.raise_for_status()
+            logger.info(f"Video Upload Service responded with status: {upload_response.status_code}")
+            upload_response.raise_for_status()
 
-            analysis_result = analysis_response.json()
-            is_video_forbidden = analysis_result.get("final_result", {}).get("is_video_forbidden", False)
+            upload_result = upload_response.json()
+            video_id = upload_result.get("id")
 
-            if is_video_forbidden:
-                logger.warning("Video content is forbidden. Skipping video upload.")
-                forbidden_count = analysis_result.get("final_result", {}).get("forbidden_images_count", 0)
-                logger.warning(f"Found {forbidden_count} forbidden frames in the video.")
+            if video_id:
+                logger.info(f"Video uploaded successfully. Video ID: {video_id}")
             else:
-                # Step 3.2: Upload video if content is approved
-                logger.info("Video content is approved. Proceeding to upload...")
-                logger.info(f"Calling Video Upload Service at: {VIDEO_UPLOAD_URL}")
-
-                upload_response = await client.post(VIDEO_UPLOAD_URL, json={"url": video_link}, timeout=120.0)
-
-                logger.info(f"Video Upload Service responded with status: {upload_response.status_code}")
-                upload_response.raise_for_status()
-
-                upload_result = upload_response.json()
-                video_id = upload_result.get("id")
-
-                if video_id:
-                    logger.info(f"Video uploaded successfully. Video ID: {video_id}")
-                else:
-                    logger.warning("Video upload succeeded but no ID was returned.")
+                logger.warning("Video upload succeeded but no ID was returned.")
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from video service {e.request.url}: Status {e.response.status_code} - Response: {e.response.text}")
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error from video service: {e.response.text}")
+            logger.error(f"HTTP error from Video Upload Service: Status {e.response.status_code} - Response: {e.response.text}")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error from Video Upload Service: {e.response.text}")
     else:
-        logger.info("No video link provided, skipping video processing.")
+        logger.info("No video link provided, skipping video upload.")
 
     # --- Step 4: Prepare Final Payload with Description Service ---
     try:
