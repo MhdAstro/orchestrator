@@ -15,8 +15,9 @@ router = APIRouter()
 # --- External Service URLs ---
 # Replace these with the actual URLs of your services.
 SMART_UPLOADER_URL = "https://smart-uploader.basalam.dev/process-images"
-VIDEO_CHECK_URL = "https://dwh-n8n.basalam.dev/webhook-test/Video-Check"
-DESCRIPTION_SERVICE_URL = "https://request-maker.basalam.dev/api/v1/generate-description" # <-- IMPORTANT: Update this URL
+VIDEO_ANALYSIS_URL = "https://video-analysis.basalam.dev/analyze-video/"
+VIDEO_UPLOAD_URL = "https://videoupload.basalam.dev/upload-from-url/"
+DESCRIPTION_SERVICE_URL = "https://request-maker.basalam.dev/api/v1/generate-description"
 BASALAM_USER_INFO_URL = "https://core.basalam.com/v3/users/me"
 BASALAM_PRODUCTS_URL_TEMPLATE = "https://core.basalam.com/v3/vendors/{vendor_id}/products"
 
@@ -37,11 +38,15 @@ async def create_product_from_webhook(
 ):
     """
     This endpoint orchestrates the entire product creation workflow:
-    1.  Receives a raw webhook payload.
-    2.  Calls media processing services (images and video).
-    3.  Calls the description service to generate a base product payload.
-    4.  Injects media IDs into the payload with the correct format.
-    5.  Submits the final, complete payload to the Basalam API.
+    1.  Receives a raw webhook payload from Telegram.
+    2.  Authenticates user and retrieves vendor ID.
+    3.  Processes images through Smart Uploader service.
+    4.  Processes video in 2 steps:
+        a. Analyzes video content for moderation (video-analysis service)
+        b. Uploads video if content is approved (videoupload service)
+    5.  Calls the description service to generate product details.
+    6.  Injects media IDs into the payload with the correct format.
+    7.  Submits the final, complete payload to the Basalam API.
     """
     # --- Step 1: Extract Data from Incoming Payload ---
     logger.info("Orchestration started for a new product.")
@@ -73,59 +78,70 @@ async def create_product_from_webhook(
         logger.error(f"HTTP error from Basalam user info API: Status {e.response.status_code} - Response: {e.response.text}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Authentication failed: {e.response.text}")
 
-    # --- Step 2: Process Media (Images and Video Concurrently) ---
+    # --- Step 2: Process Images ---
     try:
-        tasks = []
-        task_urls = []
         logger.info(f"Calling Image Uploader for {len(photo_links)} photos at: {SMART_UPLOADER_URL}")
-        tasks.append(client.post(SMART_UPLOADER_URL, json={"photo_links": photo_links}))
-        task_urls.append(SMART_UPLOADER_URL)
+        image_response = await client.post(SMART_UPLOADER_URL, json={"photo_links": photo_links})
 
-        video_task_present = False
-        if video_link:
-            video_task_present = True
-            logger.info(f"Calling Video Checker at: {VIDEO_CHECK_URL}")
-            tasks.append(client.post(VIDEO_CHECK_URL, json={"video-link": video_link}))
-            task_urls.append(VIDEO_CHECK_URL)
-        else:
-            logger.info("No video link provided, skipping video check.")
-
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for i, res in enumerate(responses):
-            if isinstance(res, Exception):
-                failed_url = task_urls[i]
-                logger.error(f"Network error while calling {failed_url}: {res}")
-                raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=f"Network error for {failed_url}")
-
-        image_response = responses[0]
         logger.info(f"Image Uploader responded with status: {image_response.status_code}")
         logger.info(f"Image Uploader RAW RESPONSE BODY: {image_response.text}") # For debugging
         image_response.raise_for_status()
+
         processed_images = image_response.json().get("processed_images", [])
         image_ids = [img['id'] for img in processed_images if 'id' in img]
-        
+
         if not image_ids:
             logger.warning("Image Uploader returned no valid image IDs.")
             raise HTTPException(status_code=400, detail="Uploader service returned no valid image IDs.")
         logger.info(f"Successfully processed {len(image_ids)} image IDs.")
 
-        video_id = None
-        if video_task_present:
-            video_response = responses[1]
-            logger.info(f"Video Checker responded with status: {video_response.status_code}")
-            video_response.raise_for_status()
-            if not video_response.json().get("is_forbidden"):
-                video_id = video_response.json().get("id")
-                logger.info(f"Video is not forbidden. Video ID: {video_id}")
-            else:
-                logger.warning("Video was marked as forbidden by the checking service.")
-
     except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error from a media service {e.request.url}: Status {e.response.status_code} - Response: {e.response.text}")
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error from media service {e.request.url}: {e.response.text}")
+        logger.error(f"HTTP error from Image Uploader: Status {e.response.status_code} - Response: {e.response.text}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error from Image Uploader: {e.response.text}")
 
-    # --- Step 3: Prepare Final Payload with Description Service ---
+    # --- Step 3: Process Video (2-Step: Analyze then Upload) ---
+    video_id = None
+    if video_link:
+        try:
+            # Step 3.1: Analyze video content for moderation
+            logger.info(f"Calling Video Analysis Service at: {VIDEO_ANALYSIS_URL}")
+            analysis_response = await client.post(VIDEO_ANALYSIS_URL, json={"url": video_link}, timeout=120.0)
+
+            logger.info(f"Video Analysis Service responded with status: {analysis_response.status_code}")
+            analysis_response.raise_for_status()
+
+            analysis_result = analysis_response.json()
+            is_video_forbidden = analysis_result.get("final_result", {}).get("is_video_forbidden", False)
+
+            if is_video_forbidden:
+                logger.warning("Video content is forbidden. Skipping video upload.")
+                forbidden_count = analysis_result.get("final_result", {}).get("forbidden_images_count", 0)
+                logger.warning(f"Found {forbidden_count} forbidden frames in the video.")
+            else:
+                # Step 3.2: Upload video if content is approved
+                logger.info("Video content is approved. Proceeding to upload...")
+                logger.info(f"Calling Video Upload Service at: {VIDEO_UPLOAD_URL}")
+
+                upload_response = await client.post(VIDEO_UPLOAD_URL, json={"url": video_link}, timeout=120.0)
+
+                logger.info(f"Video Upload Service responded with status: {upload_response.status_code}")
+                upload_response.raise_for_status()
+
+                upload_result = upload_response.json()
+                video_id = upload_result.get("id")
+
+                if video_id:
+                    logger.info(f"Video uploaded successfully. Video ID: {video_id}")
+                else:
+                    logger.warning("Video upload succeeded but no ID was returned.")
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error from video service {e.request.url}: Status {e.response.status_code} - Response: {e.response.text}")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error from video service: {e.response.text}")
+    else:
+        logger.info("No video link provided, skipping video processing.")
+
+    # --- Step 4: Prepare Final Payload with Description Service ---
     try:
         new_service_payload = {"raw_text": description}
         logger.info(f"Calling Description Service at: {DESCRIPTION_SERVICE_URL}")
